@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -39,6 +40,16 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_RATE_LIMIT_RE = re.compile(rb"blocked for (\d+) seconds", re.IGNORECASE)
+
+
+def _parse_block_seconds(content: bytes) -> Optional[int]:
+    """Extract the block duration in seconds from a 429 response body."""
+    match = _RATE_LIMIT_RE.search(content)
+    if match is None:
+        return None
+    return int(match.group(1))
+
 
 class ConnectionException(Exception):
     """When can not connect to Ariston cloud"""
@@ -46,6 +57,10 @@ class ConnectionException(Exception):
 
 class AristonAPI:
     """Ariston API class"""
+
+    # Shared across all instances: one 429 silences every caller (all three
+    # HA coordinators) until the block window has passed.
+    _blocked_until: float = 0.0
 
     def __init__(
         self,
@@ -470,6 +485,11 @@ class AristonAPI:
         is_retry: bool = False,
     ) -> Optional[dict[str, Any]]:
         """Request with requests"""
+        if not is_retry and time.time() < AristonAPI._blocked_until:
+            raise ConnectionException(
+                429,
+                "Rate limited; skipping request until the block window ends",
+            )
         headers: dict[str, Any] = {
             "User-Agent": self.__user_agent,
             "ar.authToken": self.__token,
@@ -495,8 +515,27 @@ class AristonAPI:
                 case 404:
                     return None
                 case 429:
-                    content = response.content.decode()
-                    raise ConnectionException(response.status_code, content)
+                    content = response.content
+                    wait_seconds = _parse_block_seconds(content)
+                    if wait_seconds is not None:
+                        wait_seconds += 1
+                        _LOGGER.warning(
+                            "Rate limited (429) for %s seconds; waiting it out",
+                            wait_seconds,
+                        )
+                    else:
+                        wait_seconds = 5
+                        _LOGGER.warning(
+                            "Rate limited (429) without parsable block "
+                            "duration; falling back to 5s wait"
+                        )
+                    AristonAPI._blocked_until = time.time() + wait_seconds
+                    if not is_retry:
+                        time.sleep(wait_seconds)
+                        return self.__request(method, path, params, body, True)
+                    raise ConnectionException(
+                        response.status_code, content.decode()
+                    )
                 case _:
                     if not is_retry:
                         time.sleep(5)
@@ -932,6 +971,11 @@ class AristonAPI:
         is_retry: bool = False,
     ) -> Optional[dict[str, Any]]:
         """Async request with aiohttp"""
+        if not is_retry and time.time() < AristonAPI._blocked_until:
+            raise ConnectionException(
+                429,
+                "Rate limited; skipping request until the block window ends",
+            )
         headers: dict[str, Any] = {
             "User-Agent": self.__user_agent,
             "ar.authToken": self.__token,
@@ -965,6 +1009,26 @@ class AristonAPI:
                         return None
                     case 429:
                         content = await response.content.read()
+                        wait_seconds = _parse_block_seconds(content)
+                        if wait_seconds is not None:
+                            wait_seconds += 1
+                            _LOGGER.warning(
+                                "Rate limited (429) for %s seconds; "
+                                "waiting it out",
+                                wait_seconds,
+                            )
+                        else:
+                            wait_seconds = 5
+                            _LOGGER.warning(
+                                "Rate limited (429) without parsable block "
+                                "duration; falling back to 5s wait"
+                            )
+                        AristonAPI._blocked_until = time.time() + wait_seconds
+                        if not is_retry:
+                            await asyncio.sleep(wait_seconds)
+                            return await self.__async_request(
+                                method, path, params, body, True
+                            )
                         raise ConnectionException(response.status, content)
                     case _:
                         if not is_retry:
