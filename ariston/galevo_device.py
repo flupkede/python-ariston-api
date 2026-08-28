@@ -18,6 +18,7 @@ from .const import (
     DeviceProperties,
     GasEnergyUnit,
     GasType,
+    HOLIDAY_DATE_FORMAT,
     PlantMode,
     PropertyType,
     ThermostatProperties,
@@ -979,7 +980,9 @@ class AristonGalevoDevice(AristonDevice):
     @staticmethod
     def _create_holiday_end_date(holiday_end: Optional[date]):
         return (
-            None if holiday_end is None else holiday_end.strftime("%Y-%m-%dT00:00:00")
+            None
+            if holiday_end is None
+            else holiday_end.strftime(HOLIDAY_DATE_FORMAT)
         )
 
     def _set_holiday(self, holiday_end_date: Optional[str]):

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from datetime import date
 from typing import Any, Optional
 
 from .ariston_api import AristonAPI
-from .const import VelisDeviceProperties
+from .const import HOLIDAY_DATE_FORMAT, VelisDeviceProperties
 from .velis_base_device import AristonVelisBaseDevice
 from .device import AristonDevice
 
@@ -87,6 +88,24 @@ class AristonVelisDevice(AristonDevice, AristonVelisBaseDevice, ABC):
             self.plant_settings[self.max_setpoint_temp],
         )
         self.plant_settings[self.max_setpoint_temp] = max_setpoint_temp
+
+    @staticmethod
+    def _create_holiday_end_date(holiday_end: Optional[date]) -> Optional[str]:
+        return (
+            None
+            if holiday_end is None
+            else holiday_end.strftime(HOLIDAY_DATE_FORMAT)
+        )
+
+    def set_velis_holiday(self, holiday_end: Optional[date]) -> None:
+        """Set Velis holiday on device"""
+        self.api.set_velis_holiday(self.gw, self._create_holiday_end_date(holiday_end))
+
+    async def async_set_velis_holiday(self, holiday_end: Optional[date]) -> None:
+        """Async set Velis holiday on device"""
+        await self.api.async_set_velis_holiday(
+            self.gw, self._create_holiday_end_date(holiday_end)
+        )
 
     @property
     @abstractmethod
