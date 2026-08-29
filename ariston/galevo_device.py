@@ -44,9 +44,9 @@ class AristonGalevoDevice(AristonDevice):
         super().__init__(api, attributes)
         self.umsys = "si" if is_metric else "us"
         self.language_tag = language_tag
-        self.consumptions_settings: dict[str, Any] = dict()
-        self.energy_account: dict[str, Any] = dict()
-        self.menu_items: list[dict[str, Any]] = list()
+        self.consumptions_settings: dict[str, Any] = {}
+        self.energy_account: dict[str, Any] = {}
+        self.menu_items: list[dict[str, Any]] = []
 
     @property
     def consumption_type(self) -> str:

@@ -23,7 +23,7 @@ class AristonVelisDevice(AristonDevice, AristonVelisBaseDevice, ABC):
         attributes: dict[str, Any],
     ) -> None:
         super().__init__(api, attributes)
-        self.plant_settings: dict[str, Any] = dict()
+        self.plant_settings: dict[str, Any] = {}
 
     @property
     @abstractmethod
