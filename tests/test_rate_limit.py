@@ -92,21 +92,23 @@ def test_429_twice_raises():
     http = MagicMock(
         side_effect=[_sync_response(429, body), _sync_response(429, body)]
     )
+    api = _api()
     with patch("ariston.ariston_api.requests.request", http), patch(
         "ariston.ariston_api.time.sleep"
     ):
         with pytest.raises(ConnectionException):
-            _api()._get("https://example/api")
+            api._get("https://example/api")
 
     assert http.call_count == 2  # one retry, then raise — no infinite loop
 
 
-def test_blocked_until_short_circuits():
-    AristonAPI._blocked_until = time.time() + 30
+def test_blocked_until_short_circuits(monkeypatch):
+    monkeypatch.setattr(AristonAPI, "_blocked_until", time.time() + 30)
     http = MagicMock()
+    api = _api()
     with patch("ariston.ariston_api.requests.request", http):
         with pytest.raises(ConnectionException):
-            _api()._get("https://example/api")
+            api._get("https://example/api")
 
     http.assert_not_called()  # no network call inside the block window
 
@@ -180,9 +182,10 @@ def test_async_429_parses_and_retries():
     assert sleeps == [67]  # parsed 66 + 1s margin
 
 
-def test_async_blocked_until_short_circuits():
-    AristonAPI._blocked_until = time.time() + 30
+def test_async_blocked_until_short_circuits(monkeypatch):
+    monkeypatch.setattr(AristonAPI, "_blocked_until", time.time() + 30)
     calls: list[int] = []
+    api = _api()
 
     async def run() -> None:
         with patch(
@@ -190,7 +193,7 @@ def test_async_blocked_until_short_circuits():
             _fake_session_cls([], calls),
         ):
             with pytest.raises(ConnectionException):
-                await _api()._async_get("https://example/api")
+                await api._async_get("https://example/api")
 
     asyncio.run(run())
 
