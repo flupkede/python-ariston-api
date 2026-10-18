@@ -25,6 +25,11 @@ from .const import (
     ARISTON_TIME_PROGS,
     ARISTON_VELIS,
     ARISTON_MENU_ITEMS,
+    ARISTON_R2_HOME,
+    ARISTON_R2_LOGIN_PAGE,
+    ARISTON_R2_SLP_GET_DATA,
+    ARISTON_R2_SLP_SET_DATA,
+    ARISTON_R2_USER_AGENT,
     BsbOperativeMode,
     BsbZoneMode,
     DeviceFeatures,
@@ -88,6 +93,16 @@ class AristonAPI:
         self.__api_url = api_url
         self.__token = ""
         self.__user_agent = user_agent
+        # Web-app (R2) cookie session; created lazily (aiohttp.CookieJar
+        # needs a running event loop) and logged in on first use.
+        self.__r2_cookies: Optional[aiohttp.CookieJar] = None
+        self.__r2_logged_in = False
+
+    def _r2_cookies(self) -> aiohttp.CookieJar:
+        """Lazily create the R2 cookie jar (requires a running loop)."""
+        if self.__r2_cookies is None:
+            self.__r2_cookies = aiohttp.CookieJar()
+        return self.__r2_cookies
 
     def connect(self) -> bool:
         """Login to ariston cloud and get token"""
@@ -787,6 +802,132 @@ class AristonAPI:
                 "new": value.value,
             },
         )
+
+    @staticmethod
+    def _build_nuos_r2_payload(plant_data: dict[str, Any], op_mode: int) -> dict[str, Any]:
+        """Build the R2 PlantHomeSlp/SetData envelope for an operative mode.
+
+        Mirrors the official web app: the cached plantData is echoed back
+        and only the viewModel fields change.
+        """
+        return {
+            "plantData": {
+                "__type__": ["my.entities.entityiface", "my.entities.slpplantdata"],
+                "gatewayId": plant_data.get("gw"),
+                "on": plant_data.get("on"),
+                "mode": plant_data.get("mode"),
+                "waterTemp": plant_data.get("waterTemp"),
+                "comfortTemp": plant_data.get("comfortTemp"),
+                "reducedTemp": plant_data.get("reducedTemp"),
+                "procReqTemp": plant_data.get("procReqTemp"),
+                "opMode": plant_data.get("opMode"),
+                "holidayUntil": plant_data.get("holidayUntil"),
+                "boostOn": plant_data.get("boostOn"),
+                "hpState": plant_data.get("hpState"),
+            },
+            "viewModel": {
+                "on": plant_data.get("on"),
+                "plantMode": plant_data.get("mode"),
+                "opMode": op_mode,
+                "boostOn": plant_data.get("boostOn"),
+                "comfortTemp": plant_data.get("comfortTemp"),
+                "holidayUntil": plant_data.get("holidayUntil"),
+            },
+        }
+
+    async def _async_r2_login(self) -> None:
+        """Log in to the R2 web app (form + anti-forgery token, cookie session)."""
+        self.__r2_logged_in = False
+        async with aiohttp.ClientSession(
+            cookie_jar=self._r2_cookies(),
+            headers={"User-Agent": ARISTON_R2_USER_AGENT},
+        ) as session:
+            async with session.get(ARISTON_R2_LOGIN_PAGE) as response:
+                html = await response.text()
+                if response.status != 200:
+                    raise ConnectionException(
+                        f"R2 login page returned HTTP {response.status}"
+                    )
+                match = re.search(
+                    r'name="__RequestVerificationToken"[^>]*value="([^"]+)"', html
+                )
+                if match is None:
+                    raise ConnectionException(
+                        "R2 login page has no __RequestVerificationToken"
+                    )
+                verification_token = match.group(1)
+
+            async with session.post(
+                ARISTON_R2_LOGIN_PAGE,
+                data={
+                    "__RequestVerificationToken": verification_token,
+                    "email": self.__username,
+                    "password": self.__password,
+                    "rememberMe": "false",
+                },
+                allow_redirects=False,
+            ) as response:
+                if response.status not in (200, 302):
+                    raise ConnectionException(
+                        f"R2 login returned HTTP {response.status}"
+                    )
+        self.__r2_logged_in = True
+
+    async def _async_r2_get_slp_plant_data(self, gw_id: str) -> dict[str, Any]:
+        """Read the Nuos Split plant data through the R2 web app."""
+        async with aiohttp.ClientSession(
+            cookie_jar=self._r2_cookies(),
+            headers={"User-Agent": ARISTON_R2_USER_AGENT},
+        ) as session:
+            async with session.get(
+                ARISTON_R2_SLP_GET_DATA.format(gw_id)
+            ) as response:
+                if response.status != 200:
+                    raise ConnectionException(
+                        f"R2 GetData returned HTTP {response.status}"
+                    )
+                try:
+                    body = await response.json()
+                    return body["data"]["plantData"]
+                except (aiohttp.ContentTypeError, KeyError, ValueError) as err:
+                    # An expired R2 forms-auth session redirects to the login
+                    # page: HTTP 200 text/html. Surface as ConnectionException
+                    # so the caller's fresh-login retry fires.
+                    raise ConnectionException(
+                        "R2 GetData returned no plant data (session expired?)"
+                    ) from err
+
+    async def async_set_nuos_mode_via_r2(
+        self, gw_id: str, value: NuosSplitOperativeMode
+    ) -> None:
+        """Set a Nuos Split operative mode through the R2 web app.
+
+        api/v2 operativeMode accepts values 1+ but silently drops 0 (GREEN);
+        this endpoint applies every value — it is what the official app uses.
+        """
+        if not self.__r2_logged_in:
+            await self._async_r2_login()
+        try:
+            plant_data = await self._async_r2_get_slp_plant_data(gw_id)
+        except ConnectionException:
+            # Session may have expired; one fresh login, then retry the read.
+            await self._async_r2_login()
+            plant_data = await self._async_r2_get_slp_plant_data(gw_id)
+        payload = self._build_nuos_r2_payload(plant_data, value.value)
+        async with aiohttp.ClientSession(
+            cookie_jar=self._r2_cookies(),
+            headers={
+                "User-Agent": ARISTON_R2_USER_AGENT,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        ) as session:
+            async with session.post(
+                ARISTON_R2_SLP_SET_DATA.format(gw_id), json=payload
+            ) as response:
+                if response.status != 200:
+                    raise ConnectionException(
+                        f"R2 SetData returned HTTP {response.status}"
+                    )
 
     async def async_set_bsb_mode(self, gw_id: str, value: BsbOperativeMode) -> None:
         """Async set Bsb mode"""
